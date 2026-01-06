@@ -1,32 +1,23 @@
 // @author comser.dev
 // ==================================================================================================
-// [cmsUtil.cpp] cms::string 유틸리티 구현 파일입니다.
+// [cmsStringUtil.cpp] cms-embedded-utils 문자열 유틸리티 구현 파일입니다.
 // 문자열 처리(분리/치환/포맷팅/대소문자 변환)와 UTF-8 안전 처리(길이 계산/검증/정리)를 제공합니다.
 //
 // @note 모든 함수는 버퍼 길이(maxLen)를 넘지 않도록 동작하며, 문자열은 NUL 종료를 유지합니다.
 // ==================================================================================================
 
-#include "cmsUtil.h"   // cms::string 선언
 #include <cstring>     // strlen, strstr, memcpy, memmove
-#include <strings.h>   // strcasecmp, strncasecmp, strcasestr
 #include <cstdlib>     // strtol
-#include <cctype>      // isspace, tolower, toupper
 #include <sys/types.h> // regex_t 타입
+#include <cstdint>     // uint64_t
 
 #ifdef ARDUINO
 // Arduino는 기본 환경에 정규식이 없으므로 POSIX regex를 명시적으로 포함합니다.
 #include <regex.h>     // regcomp, regexec, regfree
 #endif
 
-// [ 내부 전용 ANSI Escape Codes : 헤더에서 이동됨 ]
-#define ANSI_RES "\033[0m"           // 스타일 초기화
-#define ANSI_BOLD "\033[1m"          // 굵게
-#define ANSI_RED "\033[31m"           // 빨간색
-#define ANSI_GRN "\033[32m"           // 초록색
-#define ANSI_YEL "\033[33m"           // 노란색
-#define ANSI_CYN "\033[36m"           // 청록색
-#define ANSI_BRED "\033[91m"          // 밝은 빨간색
-#define ANSI_BLK "\033[30m"           // 검정색 글자
+
+#include "cmsStringUtil.h"   // cms::string 선언
 
 namespace {
     // 소수점 처리를 위한 10의 거듭제곱 테이블 (최대 9자리)
@@ -96,6 +87,64 @@ namespace {
         while (writeIdx > startIdx) {
             buffer[--writeIdx] = padChar;
         }
+        }
+
+        // [최적화] KMP 알고리즘을 위한 부분 일치 테이블(LPS) 생성 함수
+        void computeLPS(const char* pat, size_t m, int16_t* lps) {
+            size_t len = 0;
+            lps[0] = 0;
+            size_t i = 1;
+            while (i < m) {
+                if (cms::string::toLower((unsigned char)pat[i]) == cms::string::toLower((unsigned char)pat[len])) {
+                    len++;
+                    lps[i] = (int16_t)len;
+                    i++;
+                } else {
+                    if (len != 0) {
+                        len = lps[len - 1];
+                    } else {
+                        lps[i] = 0;
+                        i++;
+                    }
+                }
+            }
+    }
+
+    // --------------------------------------------------------------------------------------------------
+    // [appendHexInternal] 부호 없는 정수를 16진수 문자열로 변환하여 추가합니다.
+    // --------------------------------------------------------------------------------------------------
+    void appendHexInternal(char* buffer, size_t maxLen, size_t& curLen, unsigned long uval, int width, char padChar, bool uppercase) {
+        // 1. 16진수 자릿수 계산 (비트 연산 활용)
+        int digitsCount = 0;
+        unsigned long temp = uval;
+        if (temp == 0) digitsCount = 1;
+        else {
+            while (temp > 0) {
+                temp >>= 4; // 16으로 나누기
+                digitsCount++;
+            }
+        }
+
+        // 2. 전체 출력 길이 결정
+        int totalLen = (digitsCount > width) ? digitsCount : width;
+        if (curLen + totalLen >= maxLen) return;
+
+        // 3. 버퍼 공간 확보 및 NUL 종료
+        size_t startIdx = curLen;
+        size_t writeIdx = curLen + totalLen;
+        curLen = writeIdx;
+        buffer[writeIdx] = '\0';
+
+        // 4. 역순으로 16진수 문자 채우기
+        const char* hexChars = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+        unsigned long v = uval;
+        for (int i = 0; i < digitsCount; ++i) {
+            buffer[--writeIdx] = hexChars[v & 0xF];
+            v >>= 4;
+        }
+        while (writeIdx > startIdx) {
+            buffer[--writeIdx] = padChar;
+        }
     }
 
     // --------------------------------------------------------------------------------------------------
@@ -126,25 +175,70 @@ namespace {
         while (*p && (*p & 0xC0) == 0x80) p++;
         return p;
     }
-
-    // --------------------------------------------------------------------------------------------------
-    // [appendWithKeywordStyling] 텍스트를 복사하면서 특정 키워드에 ANSI 스타일을 입힙니다.
-    // 로그 메시지 내의 ERROR, FAIL 등을 자동으로 감지하여 시각적으로 강조합니다.
-    //
-    // Usage: appendWithKeywordStyling(...);
-    //
-    // @param buffer 결과가 저장될 버퍼
-    // @param maxLen 버퍼의 최대 크기
-    // @param curLen 현재 버퍼에 채워진 길이 (참조를 통해 업데이트됨)
-    // @param levelColor 기본 로그 레벨 색상
-    // @param src 원본 텍스트 소스
-    // @param len 복사할 원본 텍스트의 길이
-    // --------------------------------------------------------------------------------------------------
-
 }
 
 namespace cms {
     namespace string {
+        // 표준 strlcpy가 없는 환경을 대비한 자체 구현 (BSD 스타일)
+        size_t strlcpy(char *dst, const char *src, size_t dsize) {
+            const char *osrc = src;
+            size_t nleft = dsize;
+
+            // 버퍼 사이즈가 0이 아니면 복사 시작
+            if (nleft != 0) {
+                while (--nleft != 0) {
+                    if ((*dst++ = *src++) == '\0')
+                        break;
+                }
+            }
+
+            // 버퍼가 꽉 찼다면 강제로 널 문자 삽입
+            if (nleft == 0) {
+                if (dsize != 0)
+                    *dst = '\0'; // dst는 이미 끝을 가리키고 있음
+                while (*src++); // src의 남은 길이를 계산하기 위해 끝까지 이동
+            }
+
+            return (src - osrc - 1); // 복사하려고 시도했던 원본 길이 반환
+        }
+        // [최적화] strcasestr을 대체하는 경량 대소문자 무시 검색 함수
+        const char* strcasestr(const char* haystack, const char* needle) {
+            if (!*needle) return haystack;
+            size_t m = strlen(needle);
+
+            // [최적화] 패턴이 짧은 경우 KMP 알고리즘 적용 (LPS 테이블 스택 할당)
+            if (m <= 64) {
+                int16_t lps[64];
+                computeLPS(needle, m, lps);
+
+                size_t i = 0; // haystack index
+                size_t j = 0; // needle index
+                while (haystack[i]) {
+                    if (cms::string::toLower((unsigned char)haystack[i]) == cms::string::toLower((unsigned char)needle[j])) {
+                        i++; j++;
+                    }
+                    if (j == m) return &haystack[i - m];
+                    else if (haystack[i] && cms::string::toLower((unsigned char)haystack[i]) != cms::string::toLower((unsigned char)needle[j])) {
+                        if (j != 0) j = lps[j - 1];
+                        else i++;
+                    }
+                }
+            } else {
+                // 패턴이 너무 긴 경우(64바이트 초과) 스택 보호를 위해 Naive 방식으로 폴백
+                char first = cms::string::toLower((unsigned char)*needle);
+                for (; *haystack; haystack++) {
+                    if (cms::string::toLower((unsigned char)*haystack) == first) {
+                        const char* h = haystack + 1;
+                        const char* n = needle + 1;
+                        while (*h && *n && cms::string::toLower((unsigned char)*h) == cms::string::toLower((unsigned char)*n)) {
+                            h++; n++;
+                        }
+                        if (!*n) return haystack;
+                    }
+                }
+            }
+            return nullptr;
+        }
 
         bool Token::equals(const Token& other, bool ignoreCase) const {
             return cms::string::equals(ptr, len, other.ptr, other.len, ignoreCase);
@@ -178,7 +272,7 @@ namespace cms {
 
             size_t len = strlen(str);
             char* start = str;
-            while (*start && isspace((unsigned char)*start)) {
+            while (*start && cms::string::isSpace((unsigned char)*start)) {
                 start++;
             }
 
@@ -189,7 +283,7 @@ namespace cms {
             }
 
             char* end = str + len - 1;
-            while (end > start && isspace((unsigned char)*end)) {
+            while (end > start && cms::string::isSpace((unsigned char)*end)) {
                 *end = '\0';
                 end--;
             }
@@ -222,10 +316,14 @@ namespace cms {
         // [최적화] 길이를 이미 알고 있는 경우를 위한 오버로드
         bool startsWith(const char* str, const char* prefix, size_t prefixLen, bool ignoreCase) {
             if (!str || !prefix) return false;
-            if (ignoreCase) {
-                return strncasecmp(str, prefix, prefixLen) == 0;
+            if (!ignoreCase) return strncmp(str, prefix, prefixLen) == 0;
+
+            // [최적화] strncasecmp 대체 로직
+            for (size_t i = 0; i < prefixLen; i++) {
+                if (!str[i]) return false;
+                if (toLower((unsigned char)str[i]) != toLower((unsigned char)prefix[i])) return false;
             }
-            return strncmp(str, prefix, prefixLen) == 0;
+            return true;
         }
 
         // --------------------------------------------------------------------------------------------------
@@ -253,8 +351,59 @@ namespace cms {
             if (!s1 || !s2) return false;
 
             // 2. 내용 비교: 길이가 같으므로 memcmp/strncasecmp로 고속 비교
-            if (ignoreCase) return strncasecmp(s1, s2, s1Len) == 0;
-            return memcmp(s1, s2, s1Len) == 0;
+            if (!ignoreCase) return memcmp(s1, s2, s1Len) == 0;
+
+            // [최적화] strncasecmp 대체 로직
+            for (size_t i = 0; i < s1Len; i++) {
+                if (toLower((unsigned char)s1[i]) != toLower((unsigned char)s2[i])) return false;
+            }
+            return true;
+        }
+
+        // --------------------------------------------------------------------------------------------------
+        // [compare] 두 문자열을 사전식으로 비교합니다. (UTF-8 안전)
+        // --------------------------------------------------------------------------------------------------
+        int compare(const char* s1, size_t s1Len, const char* s2, size_t s2Len) {
+            if (s1 == s2) return 0;
+            if (!s1) return -1;
+            if (!s2) return 1;
+
+            size_t minLen = (s1Len < s2Len) ? s1Len : s2Len;
+            int res = memcmp(s1, s2, minLen);
+            if (res != 0) return res;
+
+            if (s1Len < s2Len) return -1;
+            if (s1Len > s2Len) return 1;
+            return 0;
+        }
+
+        // --------------------------------------------------------------------------------------------------
+        // [compareIgnoreCase] 대소문자를 무시하고 두 문자열을 사전식으로 비교합니다.
+        // --------------------------------------------------------------------------------------------------
+        int compareIgnoreCase(const char* s1, size_t s1Len, const char* s2, size_t s2Len) {
+            if (s1 == s2) return 0;
+            if (!s1) return -1;
+            if (!s2) return 1;
+
+            size_t minLen = (s1Len < s2Len) ? s1Len : s2Len;
+            const unsigned char* p1 = reinterpret_cast<const unsigned char*>(s1);
+            const unsigned char* p2 = reinterpret_cast<const unsigned char*>(s2);
+
+            for (size_t i = 0; i < minLen; i++) {
+                unsigned char c1 = p1[i];
+                unsigned char c2 = p2[i];
+
+                // [최적화] Fast-Path: 두 바이트가 완전히 같으면 변환 없이 즉시 통과
+                if (c1 != c2) {
+                    unsigned char lc1 = toLower(c1);
+                    unsigned char lc2 = toLower(c2);
+                    if (lc1 != lc2) return (int)lc1 - (int)lc2;
+                }
+            }
+
+            if (s1Len < s2Len) return -1;
+            if (s1Len > s2Len) return 1;
+            return 0;
         }
 
         // --------------------------------------------------------------------------------------------------
@@ -274,11 +423,11 @@ namespace cms {
             // 1. 대소문자 무시 검색:
             if (ignoreCase) {
                 // 비교의 일관성을 위해 찾고자 하는 대상 문자를 미리 소문자로 변환해 둡니다.
-                char target = (char)tolower((unsigned char)c);
+                char target = toLower((unsigned char)c);
                 // 문자열의 끝('\0')을 만날 때까지 한 바이트씩 순회하며 검사합니다.
                 while (*str) {
                     // 현재 글자를 소문자로 변환하여 대상 문자와 일치하는지 확인합니다.
-                    if ((char)tolower((unsigned char)*str) == target) {
+                    if (toLower((unsigned char)*str) == target) {
                         return str; // 일치하는 위치의 메모리 주소를 즉시 반환합니다.
                     }
                     str++;
@@ -310,7 +459,7 @@ namespace cms {
 
             size_t i = 0;
             // 1. 앞부분 공백 건너뛰기
-            while (i < len && isspace((unsigned char)str[i])) i++;
+            while (i < len && cms::string::isSpace((unsigned char)str[i])) i++;
             if (i == len) return 0;
 
             // 2. 부호 처리
@@ -320,12 +469,110 @@ namespace cms {
 
             // 3. 숫자 파싱
             long long val = 0;
-            while (i < len && isdigit((unsigned char)str[i])) {
-                val = val * 10 + (str[i] - '0');
+            while (i < len && cms::string::isDigit((unsigned char)str[i])) {
+                unsigned char c = (unsigned char)str[i];
+                val = val * 10 + (c - '0');
                 i++;
             }
 
             return static_cast<int>(val * sign);
+        }
+
+        // --------------------------------------------------------------------------------------------------
+        // [isDigit] 문자열이 유효한 10진수 정수 형식인지 검사합니다.
+        // --------------------------------------------------------------------------------------------------
+        bool isDigit(const char* str) {
+            if (!str || *str == '\0') return false;
+            return isDigit(str, strlen(str));
+        }
+
+        bool isDigit(const char* str, size_t len) {
+            if (!str || len == 0) return false;
+
+            size_t i = 0;
+            // 1. 앞부분 공백 건너뛰기
+            while (i < len && cms::string::isSpace((unsigned char)str[i])) i++;
+            if (i == len) return false;
+
+            // 2. 부호 처리
+            if (str[i] == '+' || str[i] == '-') i++;
+
+            size_t digitCount = 0;
+            // 3. 숫자 본체 검사
+            while (i < len && cms::string::isDigit((unsigned char)str[i])) {
+                i++;
+                digitCount++;
+            }
+
+            // 4. 뒷부분 공백 허용 및 최종 유효성 판단
+            while (i < len && cms::string::isSpace((unsigned char)str[i])) i++;
+            return (i == len && digitCount > 0);
+        }
+
+        // --------------------------------------------------------------------------------------------------
+        // [hexToInt] 16진수 문자열을 정수로 변환합니다.
+        // --------------------------------------------------------------------------------------------------
+        int hexToInt(const char* str) {
+            if (!str || *str == '\0') return 0;
+            return hexToInt(str, strlen(str));
+        }
+
+        int hexToInt(const char* str, size_t len) {
+            if (!str || len == 0) return 0;
+
+            size_t i = 0;
+            // 1. 앞부분 공백 건너뛰기
+            while (i < len && cms::string::isSpace((unsigned char)str[i])) i++;
+            if (i == len) return 0;
+
+            // 2. 0x 또는 0X 접두사 처리
+            if (i + 1 < len && str[i] == '0' && toLower((unsigned char)str[i+1]) == 'x') {
+                i += 2;
+            }
+
+            unsigned int val = 0;
+            while (i < len && isHexDigit((unsigned char)str[i])) {
+                unsigned char c = (unsigned char)str[i++];
+                val <<= 4;
+                // [최적화] 이미 isHexDigit을 통과했으므로 isDigit 결과에 따라
+                // 숫자('0'-'9') 또는 문자('a'-'f'/'A'-'F') 값을 안전하게 더합니다.
+                if (cms::string::isDigit(c)) val += (c - '0');
+                else val += (cms::string::toLower(c) - 'a' + 10);
+            }
+            return static_cast<int>(val);
+        }
+
+        // --------------------------------------------------------------------------------------------------
+        // [isHex] 문자열이 유효한 16진수 형식인지 검사합니다.
+        // --------------------------------------------------------------------------------------------------
+        bool isHex(const char* str) {
+            if (!str || *str == '\0') return false;
+            return isHex(str, strlen(str));
+        }
+
+        bool isHex(const char* str, size_t len) {
+            if (!str || len == 0) return false;
+
+            size_t i = 0;
+            // 1. 앞부분 공백 건너뛰기
+            while (i < len && cms::string::isSpace((unsigned char)str[i])) i++;
+            if (i == len) return false;
+
+            // 2. 0x 또는 0X 접두사 처리
+            if (i + 1 < len && str[i] == '0' && toLower((unsigned char)str[i+1]) == 'x') {
+                i += 2;
+            }
+
+            size_t digitCount = 0;
+            // 3. 16진수 숫자 본체 검사
+            while (i < len && isHexDigit((unsigned char)str[i])) {
+                i++;
+                digitCount++;
+            }
+
+            // 4. 뒷부분 공백 허용 및 최종 유효성 판단
+            while (i < len && cms::string::isSpace((unsigned char)str[i])) i++;
+            return (i == len && digitCount > 0);
         }
 
         // --------------------------------------------------------------------------------------------------
@@ -342,7 +589,7 @@ namespace cms {
 
             size_t i = 0;
             // 1. 공백 스킵
-            while (i < len && isspace((unsigned char)str[i])) i++;
+            while (i < len && cms::string::isSpace((unsigned char)str[i])) i++;
             if (i == len) return 0.0;
 
             // 2. 부호 처리
@@ -352,8 +599,9 @@ namespace cms {
 
             // 3. 정수부 파싱
             double val = 0.0;
-            while (i < len && isdigit((unsigned char)str[i])) {
-                val = val * 10.0 + (str[i] - '0');
+            while (i < len && cms::string::isDigit((unsigned char)str[i])) {
+                unsigned char c = (unsigned char)str[i];
+                val = val * 10.0 + (c - '0');
                 i++;
             }
 
@@ -361,14 +609,56 @@ namespace cms {
             if (i < len && str[i] == '.') {
                 i++;
                 double weight = 0.1;
-                while (i < len && isdigit((unsigned char)str[i])) {
-                    val += (str[i] - '0') * weight;
+                while (i < len && cms::string::isDigit((unsigned char)str[i])) {
+                    unsigned char c = (unsigned char)str[i];
+                    val += (c - '0') * weight;
                     weight /= 10.0;
                     i++;
                 }
             }
 
             return val * sign;
+        }
+
+        // --------------------------------------------------------------------------------------------------
+        // [isNumeric] 문자열이 유효한 실수 형식인지 검사합니다.
+        // --------------------------------------------------------------------------------------------------
+        bool isNumeric(const char* str) {
+            if (!str || *str == '\0') return false;
+            return isNumeric(str, strlen(str));
+        }
+
+        bool isNumeric(const char* str, size_t len) {
+            if (!str || len == 0) return false;
+
+            size_t i = 0;
+            // 1. 앞부분 공백 건너뛰기
+            while (i < len && cms::string::isSpace((unsigned char)str[i])) i++;
+            if (i == len) return false;
+
+            // 2. 부호 처리
+            if (str[i] == '+' || str[i] == '-') i++;
+
+            size_t digitCount = 0;
+            bool hasDot = false;
+
+            // 3. 숫자 및 소수점 검사
+            while (i < len) {
+                unsigned char c = (unsigned char)str[i];
+                if (cms::string::isDigit(c)) {
+                    digitCount++;
+                } else if (str[i] == '.') {
+                    if (hasDot) return false; // 소수점은 하나만 허용
+                    hasDot = true;
+                } else {
+                    break;
+                }
+                i++;
+            }
+
+            // 4. 뒷부분 공백 허용 및 최종 유효성 판단
+            while (i < len && cms::string::isSpace((unsigned char)str[i])) i++;
+            return (i == len && digitCount > 0);
         }
 
         // --------------------------------------------------------------------------------------------------
@@ -450,8 +740,7 @@ namespace cms {
             if (!startPtr || *startPtr == '\0') return -1;
 
             // 2. 고속 메모리 스캔: strstr 또는 strcasestr을 사용하여 주소를 찾습니다.
-            // [참고] strcasestr은 GNU/BSD 확장 함수로, 대소문자를 구분하지 않는 고속 검색을 수행합니다.
-            const char* foundPtr = ignoreCase ? strcasestr(startPtr, target) : strstr(startPtr, target);
+            const char* foundPtr = ignoreCase ? cms::string::strcasestr(startPtr, target) : strstr(startPtr, target);
             if (!foundPtr) return -1;
 
             // 3. 논리적 인덱스 변환: startPtr부터 foundPtr까지의 글자 수를 계산하여 상대적 인덱스로 환산
@@ -485,7 +774,7 @@ namespace cms {
             const char* current = str;
 
             while (true) {
-                const char* found = ignoreCase ? strcasestr(current, target) : strstr(current, target);
+                const char* found = ignoreCase ? cms::string::strcasestr(current, target) : strstr(current, target);
                 if (!found) break;
                 lastFound = found;
                 current = found + 1; // 다음 검색은 발견된 위치 바로 다음부터 시작
@@ -513,7 +802,7 @@ namespace cms {
         // @param src 삽입할 문자열
         // --------------------------------------------------------------------------------------------------
         size_t insert(char* buffer, size_t maxLen, size_t curLen, size_t charIdx, const char* src) {
-            if (!buffer || !src) return curLen;
+            if (!buffer || !src || *src == '\0') return curLen;
 
             // 1. 삽입 지점 확보: 삽입할 글자 인덱스를 물리적 메모리 주소로 변환합니다.
             const char* targetPtr = findUtf8CharStart(buffer, charIdx);
@@ -522,12 +811,18 @@ namespace cms {
 
             // 2. 오버플로우 방어: 삽입 후 전체 길이가 버퍼 크기를 넘지 않도록 삽입할 길이를 조정합니다.
             if (curLen + srcLen >= maxLen) {
-                srcLen = maxLen - curLen - 1;
+                srcLen = (maxLen > curLen + 1) ? (maxLen - curLen - 1) : 0;
             }
-            if (srcLen <= 0) return;
+            if (srcLen == 0) return curLen;
 
-            // 3. 데이터 밀기: memmove를 사용하여 삽입 지점 이후의 데이터를 뒤로 밀어 공간을 만듭니다.
-            memmove(buffer + byteOffset + srcLen, buffer + byteOffset, curLen - byteOffset + 1);
+            // 3. 데이터 밀기: [최적화] 삽입 위치가 끝이 아닐 때만 memmove 수행
+            if (byteOffset < curLen) {
+                memmove(buffer + byteOffset + srcLen, buffer + byteOffset, curLen - byteOffset + 1);
+            } else {
+                // 끝에 추가하는 경우 밀어낼 필요 없이 널 종료 문자 위치만 확정
+                buffer[curLen + srcLen] = '\0';
+            }
+
             // 4. 데이터 복사: 확보된 빈 공간에 새로운 문자열을 복사해 넣습니다.
             memcpy(buffer + byteOffset, src, srcLen);
             return curLen + srcLen;
@@ -578,13 +873,13 @@ namespace cms {
 
             // 1. 추출 범위 계산: 잘라낼 시작점과 끝점의 물리적 주소를 찾습니다.
             const char* startPtr = findUtf8CharStart(src, left);
-            if (!startPtr || *startPtr == '\0') return;
+            if (!startPtr || *startPtr == '\0') return 0;
 
             const char* endPtr;
             if (right == 0) {
                 endPtr = src + strlen(src);
             } else {
-                if (right <= left) return;
+                if (right <= left) return 0;
                 // 시작 지점(startPtr)부터 상대적으로 종료 지점 탐색 (중복 스캔 방지)
                 endPtr = findUtf8CharStart(startPtr, right - left);
             }
@@ -714,10 +1009,10 @@ namespace cms {
         // @param src 추가할 데이터 소스
         // @param srcLen 추가할 데이터의 바이트 길이
         // --------------------------------------------------------------------------------------------------
-        void append(char* buffer, size_t maxLen, size_t& curLen, const char* src, size_t srcLen) {
-            if (!buffer || !src || srcLen == 0) return;
+        void append(char* __restrict buffer, size_t maxLen, size_t& curLen, const char* __restrict src, size_t srcLen) noexcept {
+            if (!buffer || !src || srcLen == 0 || curLen >= maxLen - 1) return;
 
-            size_t available = (curLen < maxLen - 1) ? (maxLen - 1 - curLen) : 0;
+            size_t available = maxLen - 1 - curLen;
             size_t toCopy = (srcLen < available) ? srcLen : available;
 
             if (toCopy > 0) {
@@ -821,10 +1116,7 @@ namespace cms {
             if (!str || !target || targetLen > strLen) return false;
             if (targetLen == 0) return true;
 
-            if (ignoreCase) {
-                return strcasestr(str, target) != nullptr;
-            }
-            return strstr(str, target) != nullptr;
+            return (ignoreCase ? cms::string::strcasestr(str, target) : strstr(str, target)) != nullptr;
         }
 
         // --------------------------------------------------------------------------------------------------
@@ -839,11 +1131,7 @@ namespace cms {
         void toUpperCase(char* str) {
             if (!str) return;
             while (*str) {
-                // UTF-8 안전 가드: ASCII 범위(0~127) 내의 문자만 변환을 시도합니다.
-                // 한글과 같은 멀티바이트 문자의 구성 바이트를 건드리면 인코딩이 깨질 수 있기 때문입니다.
-                if ((unsigned char)*str < 128) {
-                    *str = (char)toupper((unsigned char)*str);
-                }
+                *str = toUpper((unsigned char)*str);
                 str++;
             }
         }
@@ -860,9 +1148,7 @@ namespace cms {
         void toLowerCase(char* str) {
             if (!str) return;
             while (*str) {
-                if ((unsigned char)*str < 128) {
-                    *str = (char)tolower((unsigned char)*str);
-                }
+                *str = toLower((unsigned char)*str);
                 str++;
             }
         }
@@ -888,8 +1174,14 @@ namespace cms {
             if (!str || !suffix || suffixLen > strLen) return false;
 
             const char* target = str + (strLen - suffixLen);
-            if (ignoreCase) return strcasecmp(target, suffix) == 0;
-            return strcmp(target, suffix) == 0;
+            if (!ignoreCase) return strcmp(target, suffix) == 0;
+
+            // [최적화] strcasecmp 대체 로직
+            while (*target && *suffix) {
+                if (toLower((unsigned char)*target) != toLower((unsigned char)*suffix)) return false;
+                target++; suffix++;
+            }
+            return *suffix == '\0';
         }
 
         // --------------------------------------------------------------------------------------------------
@@ -914,31 +1206,38 @@ namespace cms {
             bool truncated = false;
 
             while (true) {
-                p = ignoreCase ? (char*)strcasestr(p, from) : strstr(p, from);
+                // [최적화] 단일 문자 검색 시 strchr 사용 (대소문자 구분 시)
+                if (ignoreCase) {
+                    p = (char*) cms::string::strcasestr(p, from);
+                } else {
+                    p = (fromLen == 1) ? strchr(p, *from) : strstr(p, from);
+                }
+
                 if (!p) break;
 
                 if (toLen > fromLen) {
-                    if (currentLen + (toLen - fromLen) >= maxLen) {
+                    size_t diff = toLen - fromLen;
+                    if (currentLen + diff >= maxLen) {
                         truncated = true;
                         break;
                     }
+                    // [최적화] 데이터가 늘어나는 경우만 memmove로 공간 확보
+                    memmove(p + toLen, p + fromLen, currentLen - ((p - str) + fromLen) + 1);
+                    currentLen += diff;
+                } else if (toLen < fromLen) {
+                    // [최적화] 데이터가 줄어드는 경우 memmove로 간격 좁힘
+                    size_t diff = fromLen - toLen;
+                    memmove(p + toLen, p + fromLen, currentLen - ((p - str) + fromLen) + 1);
+                    currentLen -= diff;
                 }
-
-                // [최적화] strlen(p + fromLen) 대신 이미 알고 있는 전체 길이와 오프셋 활용
-                size_t tailLen = currentLen - ((p - str) + fromLen);
-                memmove(p + toLen, p + fromLen, tailLen + 1);
+                // toLen == fromLen 인 경우는 memmove 없이 바로 memcpy 수행
 
                 memcpy(p, to, toLen);
-
-                // [최적화] 길이 정보를 수동 업데이트하여 다음 루프의 strlen 호출 제거
-                currentLen = currentLen - fromLen + toLen;
                 p += toLen;
             }
 
-            if (truncated || toLen > 1) {
-                return sanitizeUtf8(str, maxLen);
-            }
-            return currentLen;
+            // [최적화] 실제로 버퍼 오버플로우로 인해 잘린 경우에만 UTF-8 정제 수행
+            return truncated ? sanitizeUtf8(str, maxLen) : currentLen;
         }
 
         // --------------------------------------------------------------------------------------------------
@@ -1196,7 +1495,17 @@ namespace cms {
 
             const char* p = format;
             while (*p) {
-                if (*p == '%' && *(p + 1)) {
+                // [최적화] 다음 포맷 지정자(%) 위치를 찾아 리터럴 텍스트를 일괄 복사
+                const char* nextPercent = strchr(p, '%');
+                if (nextPercent != p) {
+                    size_t literalLen = (nextPercent) ? (size_t)(nextPercent - p) : strlen(p);
+                    append(buffer, maxLen, curLen, p, literalLen);
+                    p += literalLen;
+                    if (!*p) break;
+                }
+
+                // p는 이제 '%'를 가리킴
+                if (*(p + 1)) {
                     p++; // '%' 문자 건너뛰기
                     char padChar = ' ';
                     int width = 0;
@@ -1209,8 +1518,9 @@ namespace cms {
                     }
 
                     // 2. 너비(Width) 파싱 (예: %02d에서 '2')
-                    while (*p >= '0' && *p <= '9') {
-                        if (width < 100) width = width * 10 + (*p - '0'); // 비정상적인 너비 제한
+                    while (cms::string::isDigit((unsigned char)*p)) {
+                        unsigned char c = (unsigned char)*p;
+                        if (width < 100) width = width * 10 + (c - '0'); // 비정상적인 너비 제한
                         p++;
                     }
 
@@ -1218,8 +1528,9 @@ namespace cms {
                     if (*p == '.') {
                         p++;
                         precision = 0;
-                        while (*p >= '0' && *p <= '9') {
-                            precision = precision * 10 + (*p - '0');
+                        while (cms::string::isDigit((unsigned char)*p)) {
+                            unsigned char c = (unsigned char)*p;
+                            precision = precision * 10 + (c - '0');
                             p++;
                         }
                     }
@@ -1229,8 +1540,7 @@ namespace cms {
                         case 's': { // 문자열
                             const char* s = va_arg(args, const char*);
                             const char* src = s ? s : "(null)";
-                            while (*src && curLen < maxLen - 1) buffer[curLen++] = *src++;
-                            buffer[curLen] = '\0';
+                            append(buffer, maxLen, curLen, src, strlen(src));
                             break;
                         }
                         case 'd': // 정수
@@ -1239,12 +1549,24 @@ namespace cms {
                         case 'u': // 부호 없는 정수
                             appendUIntInternal(buffer, maxLen, curLen, va_arg(args, unsigned int), width, padChar);
                             break;
-                        case 'l': // long (ld, lu 대응)
+                        case 'x': // 16진수 (소문자)
+                            appendHexInternal(buffer, maxLen, curLen, va_arg(args, unsigned int), width, padChar, false);
+                            break;
+                        case 'X': // 16진수 (대문자)
+                            appendHexInternal(buffer, maxLen, curLen, va_arg(args, unsigned int), width, padChar, true);
+                            break;
+                        case 'l': // long (ld, lu, lx, lX 대응)
                             if (*(p + 1) == 'd') {
                                 appendInt(buffer, maxLen, curLen, va_arg(args, long), width, padChar);
                                 p++;
                             } else if (*(p + 1) == 'u') {
                                 appendUIntInternal(buffer, maxLen, curLen, va_arg(args, unsigned long), width, padChar);
+                                p++;
+                            } else if (*(p + 1) == 'x') {
+                                appendHexInternal(buffer, maxLen, curLen, va_arg(args, unsigned long), width, padChar, false);
+                                p++;
+                            } else if (*(p + 1) == 'X') {
+                                appendHexInternal(buffer, maxLen, curLen, va_arg(args, unsigned long), width, padChar, true);
                                 p++;
                             }
                             break;
@@ -1252,28 +1574,18 @@ namespace cms {
                             appendFloat(buffer, maxLen, curLen, va_arg(args, double), (precision >= 0) ? precision : 2);
                             break;
                         case 'c': // 단일 문자
-                            if (curLen < maxLen - 1) {
-                                buffer[curLen++] = (char)va_arg(args, int);
-                                buffer[curLen] = '\0';
+                            {
+                                char c = (char)va_arg(args, int);
+                                append(buffer, maxLen, curLen, &c, 1);
                             }
                             break;
                         case '%': // '%' 문자 자체
-                            if (curLen < maxLen - 1) {
-                                buffer[curLen++] = '%';
-                                buffer[curLen] = '\0';
-                            }
+                            append(buffer, maxLen, curLen, "%", 1);
                             break;
                         default: // 지원하지 않는 포맷은 원문 출력
-                            if (curLen < maxLen - 1) buffer[curLen++] = '%';
-                            if (curLen < maxLen - 1) buffer[curLen++] = *p;
-                            buffer[curLen] = '\0';
+                            append(buffer, maxLen, curLen, "%", 1);
+                            append(buffer, maxLen, curLen, p, 1);
                             break;
-                    }
-                } else {
-                    // 일반 문자는 그대로 버퍼에 주입
-                    if (curLen < maxLen - 1) {
-                        buffer[curLen++] = *p;
-                        buffer[curLen] = '\0';
                     }
                 }
                 p++;

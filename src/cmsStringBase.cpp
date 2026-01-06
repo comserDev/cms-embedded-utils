@@ -4,8 +4,9 @@
 /// 실제 버퍼를 소유하지 않고 주입된 메모리를 관리함으로써 템플릿 코드 비대화(Code Bloat)를
 /// 방지하고 시스템 자원을 효율적으로 사용합니다.
 
-#include "cmsStringBase.h" // 베이스 클래스 정의
-#include "cmsUtil.h"       // 문자열 처리 헬퍼 함수
+#include <cstdint>              // uint16_t 정의
+#include "cmsStringBase.h"      // 베이스 클래스 정의
+#include "cmsStringUtil.h"      // 문자열 처리 헬퍼 함수
 
 namespace cms {
 
@@ -28,15 +29,22 @@ namespace cms {
     /// @param b 문자열 데이터를 저장할 외부 char 배열 포인터
     /// @param c 버퍼의 전체 물리적 용량 (단위: bytes, 널 종료 문자 포함)
     StringBase::StringBase(char* b, size_t c)
-        : _buf(b), _capacity(c), _len(0), _maxLenSeen(0) {
+        : _buf(b), _capacity(static_cast<uint16_t>(c)), _len(0) {
+#ifdef CMS_ENABLE_PROFILING
+        _maxLenSeen = 0;
+#endif
         if (b) {
-            _len = strlen(b);
-            _maxLenSeen = _len;
+            _len = static_cast<uint16_t>(strlen(b));
+            updatePeak();
         }
     }
 
     StringBase::StringBase(char* b, size_t c, size_t l)
-        : _buf(b), _capacity(c), _len(l), _maxLenSeen(l) {}
+        : _buf(b), _capacity(static_cast<uint16_t>(c)), _len(static_cast<uint16_t>(l)) {
+#ifdef CMS_ENABLE_PROFILING
+        _maxLenSeen = _len;
+#endif
+    }
 
     /// 현재 버퍼의 사용량을 퍼센트(%) 단위로 계산합니다.
     ///
@@ -49,26 +57,18 @@ namespace cms {
     /// @endcode
     ///
     /// @return 0.0 ~ 100.0 사이의 현재 사용률
-    float StringBase::utilization() const {
+    float StringBase::utilization() const noexcept {
         if (_capacity <= 1) return 0.0f;
         return (static_cast<float>(_len) / (_capacity - 1)) * 100.0f;
     }
 
+#ifdef CMS_ENABLE_PROFILING
     /// 객체 생성 이후 도달했던 최대 버퍼 사용량을 반환합니다.
-    ///
-    /// Why: 시스템 운영 중 버퍼 크기가 적절했는지 판단하는 프로파일링 지표로 활용합니다.
-    /// How: 데이터 변경 시마다 갱신된 _maxLenSeen 값을 기준으로 계산합니다.
-    ///
-    /// 사용 예:
-    /// @code
-    /// float peak = s.peakUtilization();
-    /// @endcode
-    ///
-    /// @return 0.0 ~ 100.0 사이의 최대 사용률 (High Water Mark)
-    float StringBase::peakUtilization() const {
+    float StringBase::peakUtilization() const noexcept {
         if (_capacity <= 1) return 0.0f;
         return (static_cast<float>(_maxLenSeen) / (_capacity - 1)) * 100.0f;
     }
+#endif
 
     /// 문자열을 즉시 비웁니다.
     ///
@@ -100,19 +100,8 @@ namespace cms {
     ///
     /// @return 자기 자신의 참조
     StringBase& StringBase::operator=(const char* src) {
-        if (src) {
-            // strlcpy는 원본 문자열(src)의 전체 길이를 반환합니다.
-            size_t srcLen = strlcpy(_buf, src, _capacity);
-
-            // 실제 버퍼에 복사된 길이는 (원본 길이)와 (용량-1) 중 작은 값입니다.
-            if (_capacity > 0) {
-                _len = (srcLen >= _capacity) ? (_capacity - 1) : srcLen;
-            } else {
-                _len = 0;
-            }
-            updatePeak();
-        }
-        else clear();
+        clear();
+        if (src) append(src, strlen(src));
         return *this;
     }
 
@@ -131,15 +120,8 @@ namespace cms {
     /// @return 자기 자신의 참조
     StringBase& StringBase::operator=(const StringBase& other) {
         if (this != &other) {
-            size_t srcLen = other.length();
-            // 내 버퍼 크기에 맞춰 복사할 길이를 제한
-            _len = (srcLen < _capacity - 1) ? srcLen : _capacity - 1;
-
-            if (_len > 0) {
-                memcpy(_buf, other.c_str(), _len);
-            }
-            _buf[_len] = '\0';
-            updatePeak();
+            clear();
+            append(other.c_str(), other.length());
         }
         return *this;
     }
@@ -170,19 +152,7 @@ namespace cms {
     /// @param other 추가할 대상 객체
     /// @return 자기 자신의 참조
     StringBase& StringBase::operator+=(const StringBase& other) {
-        size_t srcLen = other.length();
-        if (srcLen > 0 && _capacity > 1) {
-            // 남은 공간 계산 (널 종료 문자 제외)
-            size_t available = (_len < _capacity - 1) ? (_capacity - 1 - _len) : 0;
-            size_t toCopy = (srcLen < available) ? srcLen : available;
-
-            if (toCopy > 0) {
-                memcpy(_buf + _len, other.c_str(), toCopy);
-                _len += toCopy;
-                _buf[_len] = '\0';
-                updatePeak();
-            }
-        }
+        append(other.c_str(), other.length());
         return *this;
     }
 
@@ -314,7 +284,9 @@ namespace cms {
     /// @param width 최소 출력 너비
     /// @param padChar 채움 문자
     void StringBase::appendInt(long val, int width, char padChar) {
-        cms::string::appendInt(_buf, _capacity, _len, val, width, padChar);
+        size_t curLen = _len;
+        cms::string::appendInt(_buf, _capacity, curLen, val, width, padChar);
+        _len = static_cast<uint16_t>(curLen);
         updatePeak();
     }
 
@@ -322,7 +294,9 @@ namespace cms {
     /// @param val 추가할 실수 값
     /// @param decimalPlaces 소수점 이하 자리수
     void StringBase::appendFloat(float val, int decimalPlaces) {
-        cms::string::appendFloat(_buf, _capacity, _len, val, decimalPlaces);
+        size_t curLen = _len;
+        cms::string::appendFloat(_buf, _capacity, curLen, val, decimalPlaces);
+        _len = static_cast<uint16_t>(curLen);
         updatePeak();
     }
 
@@ -341,9 +315,19 @@ namespace cms {
     ///
     /// @return 포맷팅 후 최종 문자열의 전체 바이트 길이
     int StringBase::appendPrintf(const char* format, va_list args) {
-        _len = cms::string::appendPrintf(_buf, _capacity, _len, format, args);
+        size_t curLen = _len;
+        int ret = cms::string::appendPrintf(_buf, _capacity, curLen, format, args);
+        _len = static_cast<uint16_t>(curLen);
         updatePeak();
-        return (int)_len;
+        return ret;
+    }
+
+    int StringBase::appendPrintf(const char* format, ...) {
+        va_list args;
+        va_start(args, format);
+        int ret = appendPrintf(format, args);
+        va_end(args);
+        return ret;
     }
 
     /// printf 스타일로 문자열을 조립합니다. 기존 내용은 삭제됩니다.
@@ -356,12 +340,16 @@ namespace cms {
     /// @param format 포맷 문자열
     ///
     /// @return 작성된 문자열의 바이트 길이
-    int StringBase::printf(const char* format, ...) {
+    int StringBase::printf(const char* format, va_list args) {
         if (!format) return 0;
         clear();
+        return appendPrintf(format, args);
+    }
+
+    int StringBase::printf(const char* format, ...) {
         va_list args;
         va_start(args, format);
-        int ret = appendPrintf(format, args);
+        int ret = printf(format, args);
         va_end(args);
         return ret;
     }
@@ -425,12 +413,16 @@ namespace cms {
     /// @param charIdx 삽입할 논리적 글자 위치
     /// @param src 삽입할 문자열 포인터
     void StringBase::insert(size_t charIdx, const char* src) {
+        if (!src || *src == '\0') return;
         _len = cms::string::insert(_buf, _capacity, _len, charIdx, src);
-        sanitize();
+        updatePeak();
+        // 삽입 후 버퍼가 가득 찼다면 끝부분의 UTF-8 문자가 잘렸을 가능성이 있으므로 정제 수행
+        if (_len >= _capacity - 1) sanitize();
     }
 
     /// 특정 글자 위치에 문자를 끼워 넣습니다.
     void StringBase::insert(size_t charIdx, char c) {
+        if (c == '\0') return;
         char tmp[2] = {c, '\0'};
         insert(charIdx, tmp);
     }
@@ -439,13 +431,30 @@ namespace cms {
     /// @param charIdx 삭제 시작 위치
     /// @param charCount 삭제할 글자 수
     void StringBase::remove(size_t charIdx, size_t charCount) {
+        if (charCount == 0) return;
         _len = cms::string::remove(_buf, _len, charIdx, charCount);
-        updatePeak();
     }
 
     /// 문자열을 정수로 변환합니다.
     /// @return 변환된 정수 값 (실패 시 0)
-    int StringBase::toInt() const { return cms::string::toInt(_buf); }
+    int StringBase::toInt() const { return cms::string::toInt(_buf, _len); }
+
+    /// 문자열을 실수로 변환합니다.
+    /// @return 변환된 실수 값 (실패 시 0.0)
+    double StringBase::toFloat() const { return cms::string::toFloat(_buf, _len); }
+
+    /// 문자열이 유효한 10진수 정수 형식인지 확인합니다.
+    bool StringBase::isDigit() const { return cms::string::isDigit(_buf, _len); }
+
+    /// 16진수 문자열을 정수로 변환합니다.
+    /// @return 변환된 정수 값 (실패 시 0)
+    int StringBase::hexToInt() const { return cms::string::hexToInt(_buf, _len); }
+
+    /// 문자열이 유효한 16진수 형식인지 확인합니다.
+    bool StringBase::isHex() const { return cms::string::isHex(_buf, _len); }
+
+    /// 문자열이 유효한 실수 형식인지 확인합니다.
+    bool StringBase::isNumeric() const { return cms::string::isNumeric(_buf, _len); }
 
     /// 구분자를 기준으로 문자열을 분리합니다.
     ///
@@ -488,8 +497,13 @@ namespace cms {
     /// 물리적 바이트 오프셋 기준으로 부분 문자열을 추출합니다.
     void StringBase::byteSubstring(StringBase& dest, size_t startByte, size_t endByte) const {
         dest.clear();
-        cms::string::byteSubstring(_buf, dest._buf, dest._capacity, startByte, endByte);
-        dest.sanitize(); // sanitize() 내부에서 updateLength 호출
+        if (startByte >= _len) return;
+
+        size_t actualEnd = (endByte == 0 || endByte > _len) ? _len : endByte;
+        if (actualEnd > startByte) {
+            dest.append(_buf + startByte, actualEnd - startByte);
+        }
+        dest.sanitize(); // 바이트 단위로 잘랐으므로 UTF-8 깨짐 방지를 위해 정제 수행
     }
 
     /// 유효한 UTF-8 인코딩인지 확인합니다.
@@ -513,18 +527,33 @@ namespace cms {
         return cms::string::equals(_buf, _len, other, strlen(other), ignoreCase);
     }
 
+    /// 문자열 비교 함수 구현
+    int StringBase::compare(const char* other) const {
+        if (!other) return isEmpty() ? 0 : 1;
+        return cms::string::compare(_buf, _len, other, strlen(other));
+    }
+
+    int StringBase::compare(const StringBase& other) const {
+        return cms::string::compare(_buf, _len, other._buf, other._len);
+    }
+
+    /// 대소문자 무시 비교 함수 구현
+    int StringBase::compareIgnoreCase(const char* other) const {
+        if (!other) return isEmpty() ? 0 : 1;
+        return cms::string::compareIgnoreCase(_buf, _len, other, strlen(other));
+    }
+
+    int StringBase::compareIgnoreCase(const StringBase& other) const {
+        return cms::string::compareIgnoreCase(_buf, _len, other._buf, other._len);
+    }
+
     void StringBase::updateLength() {
         if (_buf) {
-            _len = strlen(_buf);
+            _len = static_cast<uint16_t>(strlen(_buf));
             updatePeak();
         } else {
             _len = 0;
         }
-    }
-
-    /// 최대 사용량 지표를 갱신합니다.
-    void StringBase::updatePeak() {
-        if (_len > _maxLenSeen) _maxLenSeen = _len;
     }
 
     /// 외부 문자열과 객체의 비교 연산자입니다.

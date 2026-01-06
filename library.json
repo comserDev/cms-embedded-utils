@@ -1,11 +1,11 @@
 {
-  "name": "cms-string",
+  "name": "cms-embedded-utils",
   "version": "1.0.0",
-  "description": "High-performance, zero-heap, UTF-8 safe string library for embedded systems. Features static buffer management, non-destructive splitting, and lightweight formatting without dynamic allocation.",
-  "keywords": "string, utf8, embedded, static-buffer, heapless, esp32, formatting",
+  "description": "A collection of high-performance, zero-heap utilities for embedded systems. Includes UTF-8 safe strings, thread-safe circular queues, and a lightweight asynchronous logger designed for deterministic memory usage without dynamic allocation.",
+  "keywords": "embedded, utility, string, utf8, queue, logger, heapless, esp32, async-logging",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/cms-string.git"
+    "url": "https://github.com/comserDev/cms-embedded-utils.git"
   },
   "authors": [
     {

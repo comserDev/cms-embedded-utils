@@ -4,17 +4,28 @@
 /// 실제 데이터 버퍼를 소유하지 않고 주입된 메모리를 관리함으로써 템플릿 코드 비대화(Code Bloat)를
 /// 방지하고 시스템 자원을 효율적으로 사용합니다.
 
-#ifndef CMS_STRING_BASE_H
-#define CMS_STRING_BASE_H
+#pragma once
+
 #include <stddef.h> // size_t 정의
 #include <stdarg.h> // va_list 정의
 #include <cstring>  // strlen, strcpy 등 표준 함수
+#include <cstdint>  // uint16_t 정의
+#include "cmsStringUtil.h"
+
+// 컴파일러별 printf 포맷 체크 속성
+#if defined(__GNUC__) || defined(__clang__)
+    #define CMS_PRINTF_CHECK(fmt_idx, var_idx) __attribute__((format(printf, fmt_idx, var_idx)))
+#else
+    #define CMS_PRINTF_CHECK(fmt_idx, var_idx)
+#endif
+
+/**
+ * @brief 프로파일링(최대 사용량 측정) 활성화 여부
+ * RAM을 극도로 아껴야 하는 경우 이 주석을 해제하지 마세요.
+ */
+// #define CMS_ENABLE_PROFILING
 
 namespace cms {
-
-    namespace string {
-        struct Token;
-    }
 
 // ==================================================================================================
 // [StringBase] 개요
@@ -30,7 +41,11 @@ namespace cms {
     /// @note 직접 인스턴스화할 수 없으며, 반드시 String<N> 자식 클래스를 통해 사용해야 합니다.
     class StringBase {
     public:
-        virtual ~StringBase() = default;
+        /**
+         * @brief 소멸자에서 virtual을 제거하여 vptr(4~8바이트) 오버헤드를 없앱니다.
+         * Zero-Heap 정책상 부모 포인터로 객체를 delete할 일이 없으므로 안전합니다.
+         */
+        ~StringBase() = default;
 
         /// 현재 버퍼의 사용량을 퍼센트(%) 단위로 계산합니다.
         ///
@@ -43,8 +58,9 @@ namespace cms {
         /// @endcode
         ///
         /// @return 0.0 ~ 100.0 사이의 현재 사용률
-        float utilization() const;
+        float utilization() const noexcept;
 
+#ifdef CMS_ENABLE_PROFILING
         /// 객체 생성 이후 도달했던 최대 버퍼 사용량을 퍼센트(%) 단위로 반환합니다.
         ///
         /// Why: 시스템 운영 중 버퍼 부족 위험이 있었는지 판단하는 프로파일링 지표로 활용됩니다.
@@ -56,18 +72,19 @@ namespace cms {
         /// @endcode
         ///
         /// @return 0.0 ~ 100.0 사이의 최대 사용률 (High Water Mark)
-        float peakUtilization() const;
+        float peakUtilization() const noexcept;
+#endif
 
         /// 버퍼의 전체 물리적 용량을 반환합니다.
-        size_t capacity() const { return _capacity; }
+        [[nodiscard]] size_t capacity() const noexcept { return _capacity; }
         /// 현재 저장된 문자열의 바이트 길이를 반환합니다.
-        size_t length() const { return _len; }
+        [[nodiscard]] size_t length() const noexcept { return _len; }
         /// 문자열이 비어있는지 확인합니다.
-        bool isEmpty() const { return _len == 0; }
+        [[nodiscard]] bool isEmpty() const noexcept { return _len == 0; }
         /// C 스타일 문자열 포인터를 반환합니다.
-        const char* c_str() const { return _buf; }
+        [[nodiscard]] const char* c_str() const noexcept { return _buf; }
         /// const char* 타입으로의 암시적 형변환을 지원합니다.
-        operator const char*() const { return _buf; }
+        operator const char*() const noexcept { return _buf; }
 
         /// 문자열을 즉시 비웁니다.
         ///
@@ -223,6 +240,16 @@ namespace cms {
         /// @return 포맷팅 후 최종 문자열의 전체 바이트 길이
         int appendPrintf(const char* format, va_list args);
 
+        /// 가변 인자를 받아 포맷팅된 문자열을 기존 내용 뒤에 추가합니다.
+        /// @param format printf 스타일 포맷 문자열
+        /// @return 추가된 문자열의 바이트 길이
+        int appendPrintf(const char* format, ...) CMS_PRINTF_CHECK(2, 3);
+
+        /// 가변 인자 리스트를 사용하여 포맷팅된 문자열을 버퍼에 씁니다. (기존 내용 삭제)
+        /// @param format printf 스타일 포맷 문자열
+        /// @param args 가변 인자 리스트
+        int printf(const char* format, va_list args);
+
         /// 가변 인자를 사용하여 포맷팅된 문자열을 버퍼에 씁니다.
         ///
         /// 사용 예:
@@ -233,7 +260,7 @@ namespace cms {
         /// @param format printf 스타일 포맷 문자열
         ///
         /// @return 최종적으로 작성된 문자열의 바이트 길이
-        int printf(const char* format, ...);
+        int printf(const char* format, ...) CMS_PRINTF_CHECK(2, 3);
 
         /// 스트림 스타일로 문자열을 결합합니다.
         StringBase& operator<<(const char* s);
@@ -290,6 +317,26 @@ namespace cms {
         /// @return 변환된 정수값 (실패 시 0)
         int toInt() const;
 
+        /// 문자열을 실수(double)로 변환합니다.
+        /// @return 변환된 실수값 (실패 시 0.0)
+        double toFloat() const;
+
+        /// 문자열이 유효한 10진수 정수 형식인지 확인합니다.
+        /// @return true: 정수 형식임, false: 아님
+        bool isDigit() const;
+
+        /// 16진수 문자열을 정수로 변환합니다.
+        /// @return 변환된 정수값 (실패 시 0)
+        int hexToInt() const;
+
+        /// 문자열이 유효한 16진수 형식인지 확인합니다.
+        /// @return true: 16진수 형식임, false: 아님
+        bool isHex() const;
+
+        /// 문자열이 유효한 실수(float/double) 형식인지 확인합니다.
+        /// @return true: 숫자 형식임, false: 아님
+        bool isNumeric() const;
+
         /// 구분자를 기준으로 문자열을 여러 토큰으로 분리합니다.
         ///
         /// Why: 프로토콜 패킷이나 CSV 데이터를 파싱하기 위함입니다.
@@ -340,6 +387,13 @@ namespace cms {
 
         /// 문자열 내용의 일치 여부를 확인합니다.
         bool equals(const char* other, bool ignoreCase = false) const;
+        /// 문자열 리터럴 전용 비교 최적화
+        /// Why: 컴파일 타임에 길이를 알 수 있어 strlen 호출을 생략합니다.
+        template<size_t M>
+        bool equals(const char (&other)[M], bool ignoreCase = false) const {
+            return cms::string::equals(_buf, _len, other, M - 1, ignoreCase);
+        }
+
         /// 문자열 비교 연산자입니다.
         bool operator==(const char* other) const {
             return equals(other);
@@ -347,10 +401,15 @@ namespace cms {
         /// 문자열 리터럴 비교 최적화 (컴파일 타임 길이를 활용하여 strcmp 호출 방지)
         template<size_t M>
         bool operator==(const char (&other)[M]) const {
-            return cms::string::equals(_buf, _len, other, M - 1, false);
+            return equals(other, false);
         }
         /// 문자열 불일치 연산자입니다.
         bool operator!=(const char* other) const { return !(*this == other); }
+        /// 문자열 리터럴 불일치 최적화
+        template<size_t M>
+        bool operator!=(const char (&other)[M]) const {
+            return !equals(other, false);
+        }
         /// 객체 간 비교 연산자입니다.
         bool operator==(const StringBase& other) const {
             return cms::string::equals(_buf, _len, other._buf, other._len, false);
@@ -358,6 +417,37 @@ namespace cms {
         /// 객체 간 불일치 연산자입니다.
         bool operator!=(const StringBase& other) const {
             return (_len != other._len) || !equals(other.c_str());
+        }
+
+        /// 대소 비교 연산자들 (사전식 비교)
+        bool operator<(const char* other) const { return compare(other) < 0; }
+        bool operator>(const char* other) const { return compare(other) > 0; }
+        bool operator<=(const char* other) const { return compare(other) <= 0; }
+        bool operator>=(const char* other) const { return compare(other) >= 0; }
+
+        bool operator<(const StringBase& other) const { return compare(other) < 0; }
+        bool operator>(const StringBase& other) const { return compare(other) > 0; }
+
+        /// 리터럴 최적화 대소 비교
+        template<size_t M>
+        bool operator<(const char (&other)[M]) const {
+            return cms::string::compare(_buf, _len, other, M - 1) < 0;
+        }
+        template<size_t M>
+        bool operator>(const char (&other)[M]) const {
+            return cms::string::compare(_buf, _len, other, M - 1) > 0;
+        }
+
+        /// 문자열 비교 함수
+        int compare(const char* other) const;
+        int compare(const StringBase& other) const;
+
+        /// 대소문자를 무시한 문자열 비교 함수
+        int compareIgnoreCase(const char* other) const;
+        int compareIgnoreCase(const StringBase& other) const;
+        template<size_t M>
+        int compareIgnoreCase(const char (&other)[M]) const {
+            return cms::string::compareIgnoreCase(_buf, _len, other, M - 1);
         }
 
         /// 외부 문자열과의 비교를 위한 프렌드 연산자입니다.
@@ -379,11 +469,13 @@ namespace cms {
         /// 실제 문자열 데이터가 저장되는 외부 주입 메모리 버퍼의 시작 주소.
         char* const _buf;
         /// 버퍼의 물리적 최대 크기 (널 종료 문자 포함).
-        const size_t _capacity;
+        const uint16_t _capacity; // size_t 대신 uint16_t 사용 시 RAM 절약 가능
         /// 현재 버퍼에 저장된 문자열의 바이트 길이 (널 종료 문자 제외).
-        size_t _len;
+        uint16_t _len;
+#ifdef CMS_ENABLE_PROFILING
         /// 객체 생성 이후 도달했던 최대 바이트 길이 (프로파일링용).
-        size_t _maxLenSeen;
+        uint16_t _maxLenSeen;
+#endif
 
         /// 내부 생성자입니다. 자식 클래스에서 버퍼 정보를 주입받습니다.
         StringBase(char* b, size_t c);
@@ -392,7 +484,11 @@ namespace cms {
         /// 현재 버퍼의 실제 문자열 길이를 측정하여 _len과 최대 사용량을 동기화합니다.
         void updateLength();
         /// 최대 사용량 지표를 갱신합니다.
-        void updatePeak();
+        inline void updatePeak() {
+#ifdef CMS_ENABLE_PROFILING
+            if (_len > _maxLenSeen) _maxLenSeen = _len;
+#endif
+        }
     };
 
     /// 외부 문자열과 객체의 비교 연산자입니다.
@@ -400,4 +496,3 @@ namespace cms {
     /// 외부 문자열과 객체의 불일치 연산자입니다.
     bool operator!=(const char* lhs, const StringBase& rhs);
 }
-#endif // CMS_STRING_BASE_H

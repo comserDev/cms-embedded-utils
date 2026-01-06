@@ -1,3 +1,5 @@
 *.o
-.pio/
-.vscode/
+*.exe
+.pio
+.vscode
+build

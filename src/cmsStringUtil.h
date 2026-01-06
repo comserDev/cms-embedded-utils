@@ -1,25 +1,68 @@
 // @author comser.dev
 // =========================================================
-// [cmsUtil.h] 임베디드 문자열 유틸리티의 핵심 선언부입니다.
+// [cmsStringUtil.h] cms-embedded-utils 문자열 유틸리티의 핵심 선언부입니다.
 // 제로 힙과 UTF-8 안전성을 유지하며, 인플레이스 처리를 기본으로 합니다.
 // =========================================================
 
 #pragma once
-#ifndef CMS_UTIL_H
-#define CMS_UTIL_H
+
 #include <cstring>  // strlen, strchr, strstr
 #include <stddef.h> // size_t, NULL
 #include <stdarg.h> // va_list
 
 namespace cms {
-    // [ 표준 ANSI 배경색 코드 정의 ]
-    #define ANSI_BG_RED "41"  // Red
-    #define ANSI_BG_GRN "42"  // Green
-    #define ANSI_BG_YEL "43"  // Yellow
-    #define ANSI_BG_CYN "46"  // Cyan
-    #define ANSI_BG_WHT "47"  // White (Debug용)
-
     namespace string {
+        // 표준 strlcpy가 없는 환경을 대비한 자체 구현 (BSD 스타일)
+        size_t strlcpy(char *dst, const char *src, size_t dsize);
+
+        // ---------------------------------------------------------
+        // [strcasestr] 대소문자를 구분하지 않고 부분 문자열을 검색합니다.
+        //
+        // Usage: const char* p = cms::string::strcasestr(haystack, needle);
+        //
+        // @param haystack 검색 대상 문자열
+        // @param needle 찾고자 하는 부분 문자열
+        // @return 발견된 위치의 포인터 (찾지 못하면 nullptr)
+        // ---------------------------------------------------------
+        const char* strcasestr(const char* haystack, const char* needle);
+
+        // ASCII 전용 대소문자 변환 인라인 함수
+        // [최적화] 분기 없는(Branchless) 비트 연산을 사용하여 CPU 파이프라인 효율을 극대화합니다.
+        inline char toLower(unsigned char c) noexcept {
+            // c가 'A'~'Z' 사이에 있으면 mask는 1, 아니면 0이 됩니다.
+            unsigned char mask = (unsigned char)((unsigned char)('A' - 1 - c) & (unsigned char)(c - ('Z' + 1))) >> 7;
+            return (char)(c | (mask << 5));
+        }
+
+        inline char toUpper(unsigned char c) noexcept {
+            // c가 'a'~'z' 사이에 있으면 mask는 1, 아니면 0이 됩니다.
+            unsigned char mask = (unsigned char)((unsigned char)('a' - 1 - c) & (unsigned char)(c - ('z' + 1))) >> 7;
+            return (char)(c & ~(mask << 5));
+        }
+
+        // ASCII 전용 숫자 확인 함수
+        // [최적화] 분기 없는(Branchless) 비트 연산을 사용하여 성능을 향상시킵니다.
+        inline bool isDigit(unsigned char c) noexcept {
+            return (unsigned char)((unsigned char)('0' - 1 - c) & (unsigned char)(c - ('9' + 1))) >> 7;
+        }
+
+        // ASCII 전용 공백 문자 확인 함수 (Space, \t, \n, \v, \f, \r)
+        // [최적화] 분기 없는(Branchless) 비트 연산을 사용하여 성능을 향상시킵니다.
+        inline bool isSpace(unsigned char c) noexcept {
+            unsigned char m1 = (unsigned char)((unsigned char)('\t' - 1 - c) & (unsigned char)(c - ('\r' + 1))) >> 7;
+            unsigned char m2 = (unsigned char)((unsigned char)(' ' - 1 - c) & (unsigned char)(c - (' ' + 1))) >> 7;
+            return (m1 | m2);
+        }
+
+        // ASCII 전용 16진수 문자 확인 함수 (0-9, a-f, A-F)
+        // [최적화] 분기 없는(Branchless) 비트 연산을 사용하여 성능을 향상시킵니다.
+        inline bool isHexDigit(unsigned char c) noexcept {
+            unsigned char d = (unsigned char)((unsigned char)('0' - 1 - c) & (unsigned char)(c - ('9' + 1))) >> 7;
+            unsigned char l = (unsigned char)((unsigned char)('a' - 1 - c) & (unsigned char)(c - ('f' + 1))) >> 7;
+            unsigned char u = (unsigned char)((unsigned char)('A' - 1 - c) & (unsigned char)(c - ('F' + 1))) >> 7;
+            return (d | l | u);
+        }
+
         // ---------------------------------------------------------
         // [trim] 문자열 양 끝의 공백 및 제어 문자(\r, \n, \t)를 제거합니다.
         // 후방 공백은 널 문자로 자르고, 전방 공백은 memmove로 당깁니다.
@@ -28,9 +71,6 @@ namespace cms {
         //
         // @param str 수정할 대상 문자열 (Null-terminated)
         // @note 원본 문자열이 직접 수정되므로 데이터 보존이 필요하면 복사본을 사용하세요.
-        // d trim(char* str);
-        // ------------------------------------------------------
-        // @return 트림 처리 후의 새로운 문자열 길이
         // ---------------------------------------------------------
         size_t trim(char* str);
 
@@ -61,6 +101,18 @@ namespace cms {
         // ---------------------------------------------------------
         bool equals(const char* s1, const char* s2, bool ignoreCase = false);
         bool equals(const char* s1, size_t s1Len, const char* s2, size_t s2Len, bool ignoreCase);
+
+        // ---------------------------------------------------------
+        // [compare] 두 문자열을 사전식으로 비교합니다.
+        //
+        // @param s1 비교 대상 1
+        // @param s1Len s1의 길이
+        // @param s2 비교 대상 2
+        // @param s2Len s2의 길이
+        // @return 0: 일치, <0: s1이 작음, >0: s1이 큼
+        // ---------------------------------------------------------
+        int compare(const char* s1, size_t s1Len, const char* s2, size_t s2Len);
+        int compareIgnoreCase(const char* s1, size_t s1Len, const char* s2, size_t s2Len);
 
         // ---------------------------------------------------------
         // [Token] 비파괴적 split 결과를 담는 구조체입니다.
@@ -117,6 +169,40 @@ namespace cms {
         int toInt(const char* str, size_t len);
 
         // ---------------------------------------------------------
+        // [isDigit] 문자열이 유효한 10진수 정수 형식인지 검사합니다.
+        // 부호(+, -)와 앞뒤 공백을 허용합니다.
+        //
+        // @param str 검사할 문자열
+        // @param len 문자열 길이 (0일 경우 내부에서 측정)
+        // @return true: 유효한 정수 형식, false: 아님
+        // ---------------------------------------------------------
+        bool isDigit(const char* str);
+        bool isDigit(const char* str, size_t len);
+
+        // ---------------------------------------------------------
+        // [hexToInt] 16진수 문자열을 정수(int)로 변환합니다.
+        // "0x" 또는 "0X" 접두사를 지원합니다.
+        //
+        // Usage: int v = cms::string::hexToInt("0xABC");
+        //
+        // @param str 변환할 16진수 문자열
+        // @return 변환된 정수값 (실패 시 0)
+        // ---------------------------------------------------------
+        int hexToInt(const char* str);
+        int hexToInt(const char* str, size_t len);
+
+        // ---------------------------------------------------------
+        // [isHex] 문자열이 유효한 16진수 형식인지 검사합니다.
+        // "0x" 또는 "0X" 접두사를 허용합니다.
+        //
+        // @param str 검사할 문자열
+        // @param len 문자열 길이 (0일 경우 내부에서 측정)
+        // @return true: 유효한 16진수, false: 유효하지 않음
+        // ---------------------------------------------------------
+        bool isHex(const char* str);
+        bool isHex(const char* str, size_t len);
+
+        // ---------------------------------------------------------
         // [toFloat] 숫자로 구성된 문자열을 실수(double)로 변환합니다.
         //
         // Usage: double v = cms::string::toFloat("3.14");
@@ -126,6 +212,17 @@ namespace cms {
         // ---------------------------------------------------------
         double toFloat(const char* str);
         double toFloat(const char* str, size_t len);
+
+        // ---------------------------------------------------------
+        // [isNumeric] 문자열이 유효한 실수(float/double) 형식인지 검사합니다.
+        // 부호(+, -), 소수점(.), 앞뒤 공백을 허용합니다.
+        //
+        // @param str 검사할 문자열
+        // @param len 문자열 길이 (0일 경우 내부에서 측정)
+        // @return true: 유효한 숫자 형식, false: 아님
+        // ---------------------------------------------------------
+        bool isNumeric(const char* str);
+        bool isNumeric(const char* str, size_t len);
 
         // ---------------------------------------------------------
         // [utf8_strlen] UTF-8 인코딩을 인식하여 문자열의 글자 수를 측정합니다.
@@ -374,7 +471,7 @@ namespace cms {
         // @param src 추가할 데이터 소스
         // @param srcLen 추가할 데이터의 바이트 길이
         // ---------------------------------------------------------
-        void append(char* buffer, size_t maxLen, size_t& curLen, const char* src, size_t srcLen);
+        void append(char* buffer, size_t maxLen, size_t& curLen, const char* src, size_t srcLen) noexcept;
 
         // ---------------------------------------------------------
         // [appendInt] 정수값을 문자열로 변환하여 버퍼 끝에 추가합니다.
@@ -412,6 +509,3 @@ namespace cms {
 // 2) 입력 문자열은 반드시 '\0'으로 종료되어야 합니다.
 // 3) 큰 버퍼는 전역 또는 static으로 두는 것이 안전합니다.
 // 4) UTF-8 안전 함수(find/substring/insert)를 우선 사용하세요.
-
-
-#endif // CMS_UTIL_H

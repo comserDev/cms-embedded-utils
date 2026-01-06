@@ -1,24 +1,25 @@
-# cms-string
+# cms-embedded-utils
 
-**High-performance, Zero-Heap, UTF-8 Safe String Library for Embedded Systems.**
+**High-performance, Zero-Heap, Deterministic Utilities for Embedded Systems.**
 
-`cms-string`은 메모리 자원이 제한된 임베디드 환경(ESP32, Arduino 등)에서 힙 파편화(Heap Fragmentation) 걱정 없이 안전하고 빠르게 문자열을 다루기 위해 설계된 C++ 라이브러리입니다.
+`cms-embedded-utils`는 자원이 제한된 임베디드 환경(ESP32, STM32, Arduino 등)에서 힙 파편화(Heap Fragmentation) 없이 안전하고 예측 가능한 시스템을 구축하기 위한 C++ 유틸리티 모음입니다. 모든 컴포넌트는 동적 메모리 할당을 배제하고 정적 버퍼를 기반으로 동작합니다.
 
-## ✨ 주요 특징
+## 🛠 Technical Highlights / 주요 특징
 
-- **Zero-Heap Policy**: 모든 문자열은 정적 배열(`String<N>`)에 저장됩니다. 런타임 중 `malloc`이나 `new`를 전혀 사용하지 않아 시스템 안정성이 극대화됩니다.
-- **UTF-8 Awareness**: 단순 바이트 단위 처리가 아닌, 논리적 글자 단위의 인덱싱, 검색, 자르기를 지원하여 한글 등 멀티바이트 문자가 깨지는 것을 방지합니다.
-- **Non-destructive Splitting**: 원본 문자열을 수정하지 않고 포인터와 길이 정보만으로 문자열을 분리하는 `Token` 시스템을 제공합니다.
-- **Lightweight Formatting**: 표준 `vsnprintf` 대비 스택 소모가 적은 초경량 포맷팅 엔진(`appendPrintf`)을 내장하고 있습니다.
-- **Built-in Profiling**: 버퍼 사용률(`utilization`)과 피크치(`peakUtilization`)를 실시간으로 모니터링하여 적절한 버퍼 크기 설정을 돕습니다.
+- **Zero-Heap Architecture / 제로 힙 구조**: Eliminates runtime memory allocation (`malloc`/`new`) to prevent heap fragmentation. 모든 문자열은 정적 배열에 저장되어 시스템 안정성이 극대화됩니다.
+- **UTF-8 Awareness / UTF-8 지원**: Provides logical character-based indexing and slicing, preventing corruption of multi-byte characters. 한글 등 멀티바이트 문자가 깨지는 것을 방지합니다.
+- **Thread-Safe Circular Queues / 스레드 안전 큐**: High-performance, lock-protected circular buffers for inter-task communication. 멀티태스킹 환경에서 안전한 데이터 교환을 지원합니다.
+- **AsyncLogger (Thin Template) / 비동기 로거**: A lightweight logger that minimizes code bloat using the Thin Template pattern. 템플릿 비대화를 방지하면서도 강력한 스타일링과 비동기 로깅을 제공합니다.
+- **Real-time Resource Profiling / 실시간 리소스 프로파일링**: Built-in monitoring for buffer utilization and peak usage (High Water Mark). 버퍼 사용률과 피크치를 실시간으로 모니터링합니다.
 
-## 📦 설치 방법 (PlatformIO)
+## 📦 Installation / 설치 방법
 
-`platformio.ini` 파일의 `lib_deps` 항목에 아래와 같이 추가하세요.
+### PlatformIO
+Add the repository URL to your `platformio.ini`: / `platformio.ini` 파일의 `lib_deps` 항목에 아래와 같이 추가하세요.
 
 ```ini
 lib_deps =
-    https://github.com/your-username/cms-string.git
+    https://github.com/comserDev/cms-embedded-utils.git
 ```
 
 ## 🚀 빠른 시작
@@ -50,20 +51,46 @@ cms::String<32> sub;
 ko.substring(sub, 0, 2); // "안녕"
 ```
 
-### 3. 비파괴적 문자열 분리 (Token)
+### 3. 큐 (Queue)
+
+#### 기본 큐 (Single-task / Interrupt-safe 전용)
+뮤텍스 잠금이 없어 속도가 매우 빠르며, 단일 루프 내 데이터 보관에 적합합니다.
+```cpp
+#include <cmsQueue.h>
+cms::Queue<int, 5> q;
+q.enqueue(10);
+```
+
+#### 스레드 안전 큐 (Multi-task 전용)
+멀티태스킹 환경에서 태스크 간 데이터 교환 시 사용합니다.
+```cpp
+// 10개의 정수를 저장할 수 있는 스레드 안전 큐
+cms::ThreadSafeQueue<int, 10> queue;
+
+// 데이터 추가 (가득 차면 가장 오래된 데이터 덮어씀)
+queue.enqueue(42);
+
+// 데이터 꺼내기
+int val;
+if (queue.pop(val)) {
+    // val 사용
+}
+```
+
+### 4. 고성능 비동기 로거 (Logger)
 
 ```cpp
-cms::String<64> data = "SENSOR:25.4:80";
-cms::string::Token tokens[3];
+#include <cmsLogger.h>
 
-// 원본 data를 수정하지 않고 분리
-size_t count = data.split(':', tokens, 3);
+// 전역 로거 설정
+logger.begin(cms::LogLevel::DEBUG);
 
-if (count >= 2) {
-    if (tokens[0] == "SENSOR") {
-        double val = tokens[1].toFloat(); // 25.4
-    }
-}
+// 로그 출력 (자동 스타일링 및 태그 지원)
+logger.i("시스템 시작... [Network] 연결됨");
+logger.w("센서 데이터 불안정: %d", 404);
+
+// 백그라운드 루프에서 로그 처리
+while (logger.processNextLog());
 ```
 
 ### 4. 리터럴 최적화
@@ -101,4 +128,4 @@ build_flags =
 
 ---
 **Maintainer:** comser.dev
-**Repository:** github.com/your-username/cms-string
+**Repository:** github.com/comserDev/cms-embedded-utils

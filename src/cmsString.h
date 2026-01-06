@@ -3,12 +3,12 @@
 /// 고정 크기 버퍼를 소유하여 힙 메모리 할당 없이 동작하는 문자열 컨테이너입니다.
 /// 제로 힙(Zero-Heap) 정책을 준수하며, StringBase의 로직을 상속받아 코드 중복을 최소화합니다.
 
-#ifndef CMS_STRING_H
-#define CMS_STRING_H
+#pragma once
+
 #include <stdarg.h>  // va_list
 #include <stdio.h>   // size_t
 #include <cstring>   // strlen, memcpy, memmove
-#include "cmsUtil.h" // cms::string helpers (UTF-8, regex, etc.)
+#include "cmsStringUtil.h" // cms::string helpers (UTF-8, regex, etc.)
 #include "cmsStringBase.h" // StringBase API
 
 namespace cms {
@@ -257,6 +257,9 @@ namespace cms {
         String<N>& operator<<(const StringBase& other) { StringBase::operator<<(other); return *this; }
         String<N>& operator<<(const cms::string::Token& token) { StringBase::operator<<(token); return *this; }
 
+        using StringBase::substring;
+        using StringBase::byteSubstring;
+
         // --------------------------------------------------------------------------------------------------
         // [substring] 글자 단위 범위를 추출합니다.
         //
@@ -265,6 +268,7 @@ namespace cms {
         // @param left 시작 글자 인덱스 (0부터 시작)
         // @param right 종료 글자 인덱스 (0일 경우 끝까지 추출)
         // @return 추출된 문자열을 담은 새로운 String<N> 객체
+        // @note 편의성을 위한 함수이며, 대형 버퍼 사용 시 스택 소모에 주의하세요.
         // --------------------------------------------------------------------------------------------------
         String<N> substring(size_t left, size_t right = 0) const {
             String<N> res;
@@ -318,5 +322,3 @@ namespace cms {
         return copyTokens(tokens, count, dest);
     }
 }
-
-#endif // CMS_STRING_H

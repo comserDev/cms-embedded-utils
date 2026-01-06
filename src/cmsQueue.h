@@ -3,6 +3,7 @@
 /// 임베디드 시스템의 메모리 안정성을 위해 설계된 정적 및 스레드 안전 큐 라이브러리입니다.
 
 #pragma once // 중복 포함 방지
+
 #include <stddef.h> // size_t 정의
 #ifndef ARDUINO // PC 환경(테스트용) 지원
 #include <mutex> // 표준 뮤텍스 사용
@@ -27,7 +28,8 @@ namespace cms {
 ///
 /// @tparam T 저장할 데이터 타입
 /// @tparam N 큐의 최대 용량
-template <typename T, size_t N>
+/// @tparam IndexType 인덱스 및 카운트용 타입 (기본값: size_t, 메모리 절약을 위해 uint8_t 등 사용 가능)
+template <typename T, uint8_t N, typename IndexType = uint8_t>
 class Queue {
 public:
     /// 큐의 상태를 초기화합니다.
@@ -99,10 +101,10 @@ public:
     /// @param outItem [OUT] 조회된 데이터를 저장할 참조 변수
     ///
     /// @return true: 조회 성공, false: 인덱스 범위 초과
-    bool getAt(size_t index, T& outItem) const {
+    bool getAt(IndexType index, T& outItem) const {
         if (index >= _count) return false;
         // 원형 버퍼의 물리적 위치 계산
-        size_t pos = (_head + index) % N;
+        IndexType pos = (_head + index) % N;
         outItem = _data[pos];
         return true;
     }
@@ -131,17 +133,17 @@ public:
     /// @endcode
     ///
     /// @return 현재 데이터 개수 (0 ~ N)
-    size_t size() const { return _count; }
+    IndexType size() const { return _count; }
 
 private:
     /// 데이터를 저장하는 고정 크기 정적 배열.
     T _data[N];
     /// 읽기 작업을 수행할 가장 오래된 데이터의 인덱스.
-    size_t _head;
+    IndexType _head;
     /// 쓰기 작업을 수행할 다음 데이터의 저장 위치 인덱스.
-    size_t _tail;
+    IndexType _tail;
     /// 현재 큐에 저장된 유효 데이터의 총 개수 (0 ~ N).
-    size_t _count;
+    IndexType _count;
 };
 
 // ==================================================================================================
@@ -157,7 +159,8 @@ private:
 ///
 /// @tparam T 저장할 데이터 타입
 /// @tparam N 큐의 최대 용량
-template <typename T, size_t N>
+/// @tparam IndexType 인덱스 및 카운트용 타입
+template <typename T, size_t N, typename IndexType = size_t>
 class ThreadSafeQueue {
 public:
     /// 뮤텍스를 생성하고 내부 큐를 초기화합니다.
@@ -232,7 +235,7 @@ public:
     /// @param outItem [OUT] 조회된 데이터를 저장할 참조 변수
     ///
     /// @return true: 조회 성공, false: 범위 초과
-    bool getAt(size_t index, T& outItem) const {
+    bool getAt(IndexType index, T& outItem) const {
         lock();
         bool ok = _queue.getAt(index, outItem);
         unlock();
@@ -261,7 +264,7 @@ public:
     /// @code
     /// size_t s = tsQueue.size();
     /// @endcode
-    size_t size() const { lock(); size_t count = _queue.size(); unlock(); return count; }
+    IndexType size() const { lock(); IndexType count = _queue.size(); unlock(); return count; }
 
 private:
     /// 뮤텍스를 획득하여 임계 영역에 진입합니다.
@@ -294,7 +297,7 @@ private:
 #endif
 
     /// 실제 데이터 저장 및 인덱스 관리를 담당하는 내부 큐 객체.
-    Queue<T, N> _queue;
+    Queue<T, N, IndexType> _queue;
 };
 
 } // namespace cms
