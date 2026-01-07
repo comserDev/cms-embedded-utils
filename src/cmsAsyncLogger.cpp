@@ -5,6 +5,9 @@
 #include <ctime>
 #include <cstdio>
 #include <cstring>
+#ifdef ARDUINO
+#include <Arduino.h>
+#endif
 #include "cmsAsyncLogger.h"
 
 // ANSI 이스케이프 시퀀스 정의
